@@ -4,6 +4,7 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
@@ -13,6 +14,7 @@ import optuna
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+import plotly.graph_objects as go
 
 TRAIN_SIZE = 0.80
 
@@ -25,18 +27,20 @@ def create_dataset(dataset, size=30):
     return np.array(data_X), np.array(data_Y)
 
 def objective(trial):
-    window_size = trial.suggest_int('window_size', 20, 40)
+    window_size = trial.suggest_int('window_size', 8, 15)
     train_X, train_Y = create_dataset(train, window_size)
     test_X, test_Y = create_dataset(test, window_size)
 
-    n_units = trial.suggest_int('n_units', 16, 48)
-    dropout = trial.suggest_float('dropout', 0.3, 0.6)
+    n_units = trial.suggest_int('n_units', 10, 15)
+    dropout = trial.suggest_float('dropout', 0.2, 0.5)
     lr = trial.suggest_float('lr', 1e-4, 1e-3, log=True)
 
     model = Sequential([
-        LSTM(n_units, input_shape=(window_size, 1), kernel_regularizer=regularizers.l2(0.001)),
+        LSTM(n_units,
+             input_shape=(window_size, 1)
+             ),
         Dropout(dropout),
-        Dense(1, kernel_regularizer=regularizers.l2(0.001))
+        Dense(1)
     ])
     model.compile(optimizer=Adam(learning_rate=lr), loss='mse')
 
@@ -47,11 +51,11 @@ def objective(trial):
     )
 
     model.fit(
-        train_X, train_Y, 
-        epochs=30, 
-        batch_size=16, 
-        validation_split=0.2, 
-        callbacks=[early_stop], 
+        train_X, train_Y,
+        epochs=50,
+        batch_size=16,
+        validation_split=0.2,
+        callbacks=[early_stop],
         verbose=0
         )
     loss = model.evaluate(test_X, test_Y, verbose=0)
@@ -82,14 +86,25 @@ print("Gün Sayıları (training set, test set): " + str((len(train), len(test))
 
 # 4. Model hiperparametre optimizasyonu
 study = optuna.create_study(direction='minimize')
-study.optimize(lambda trial: objective(trial), n_trials=20)
+study.optimize(lambda trial: objective(trial), n_trials=10)
 best_params = study.best_params
 print("Best parameters: ", best_params)
-# Best parameters:  {
-# 'window_size': 36,
-# 'n_units': 16, 
-# 'dropout': 0.35225296933921685, 
-# 'lr': 0.00010480608957742156}
+
+# trials = study.trials_dataframe()
+# fig = go.Figure()
+# fig.add_trace(go.Scatter(
+#     x=trials.index,
+#     y=trials['value'],
+#     mode='lines+markers',
+#     name='Validation Loss'
+# ))
+# fig.update_layout(
+#     title='Optuna Trials - Validation Loss',
+#     xaxis_title='Trial',
+#     yaxis_title='Validation Loss (val_loss)',
+#     template='plotly_white'
+# )
+# fig.show()
 
 final_window_size = best_params['window_size']
 # Verisetlerimizi Oluşturalım
@@ -98,29 +113,33 @@ test_X, test_Y = create_dataset(test, final_window_size)
 print("Original training data shape: ", train_X.shape)
 
 # 5. Final model
-model = Sequential([
-    LSTM(best_params['n_units'], 
-        input_shape=(final_window_size, 1),
-        kernel_regularizer=regularizers.l2(0.001)
-        ),
-    Dropout(best_params['dropout']),
-    Dense(1, kernel_regularizer=regularizers.l2(0.001))
-])
-model.compile(optimizer=Adam(learning_rate=best_params['lr']), loss='mse')
+tscv = TimeSeriesSplit(n_splits=3)
+for fold, (train_idx, val_idx) in enumerate(tscv.split(train_X)):
+    print(f"Fold {fold+1}")
+    X_train, X_val = train_X[train_idx], train_X[val_idx]
+    Y_train, Y_val = train_Y[train_idx], train_Y[val_idx]
 
-early_stop = EarlyStopping(
-    monitor='val_loss',      # Doğrulama kaybını izle
-    patience=5,              # 5 epoch boyunca iyileşme olmazsa durdur
-    restore_best_weights=True
-)
+    model = Sequential([
+        LSTM(best_params['n_units'],
+            input_shape=(final_window_size, 1)
+            ),
+        Dropout(best_params['dropout']),
+        Dense(1)
+    ])
+    model.compile(optimizer=Adam(learning_rate=best_params['lr']), loss='mse')
+    early_stop = EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
 
-model.fit(train_X, 
-          train_Y, 
-          epochs=30, 
-          batch_size=16,
-          validation_split=0.2,
-          callbacks=[early_stop], 
-          verbose=1)
+    model.fit(
+        X_train, Y_train,
+        epochs=100,
+        batch_size=16,
+        validation_data=(X_val, Y_val),
+        callbacks=[early_stop],
+        verbose=1
+    )
+
+    val_loss = model.evaluate(X_val, Y_val, verbose=0)
+    print(f"Validation loss for fold {fold+1}: {val_loss}")
 
 # 6. Tahmin ve görselleştirme
 rmse_train, train_predict = predict_and_score(model, train_X, train_Y)

@@ -3,7 +3,7 @@ import pandas as pd
 from tensorflow.keras.models import load_model
 from sklearn.preprocessing import MinMaxScaler
 
-window_size = 24
+window_size = 11
 
 model = load_model('lstm_model.keras')
 
